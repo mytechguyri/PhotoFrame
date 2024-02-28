@@ -1,2 +1,6 @@
 # PhotoFrame
-Digital photo frame for Raspberry Pi pulling images from a designated gmail email address
+This is a simple photo frame app for Raspberry Pi using a DSI based LCD display screen.   What is unique about this device is, there are basically no images stored on the photo frame.   It pulls them from a gmail email account.   So basically, we setup a special email address for grandma on gmail, and anytime family members send a photo to that special email address, it will show up in her LIVE digital photo frame.   The photo frame will handle multiple photos attached to an email, and will cycle through all the emails on the account, so it can get quite large.   But since its gmail, its quite easy for Granma to logon to Gmail and either download and save the images she wants to save, or order prints of, and she can move old images to a different folder so they no longer display in the digital photo frame, keeping the images fresh and current.   The program also adds a "Sent by: <sender's email address>" at the bottom of each photo so she knows who sent it.
+
+It has a password feature, so that spam emails, or other unwanted emails won't have images displayed.   We don't want someone sending pornography to grandma's picture frame while she's hosting her bridge club.   Family members sending photos just have to put the password in the subject line.
+
+There is also an optional "sleep" timer, where the photo frame will go dark and into sleep mode at a certain time day, so the light won't keep Grandma awake at night.

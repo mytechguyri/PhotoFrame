@@ -4,3 +4,5 @@ This is a simple photo frame app for Raspberry Pi using a DSI based LCD display 
 It has a password feature, so that spam emails, or other unwanted emails won't have images displayed.   We don't want someone sending pornography to grandma's picture frame while she's hosting her bridge club.   Family members sending photos just have to put the password in the subject line.
 
 There is also an optional "sleep" timer, where the photo frame will go dark and into sleep mode at a certain time day, so the light won't keep Grandma awake at night.
+
+This is basically the digital photoframe I couldn't find in commercial versions with the features I wanted.   Its designed to work with a Waveshare touch screen, on Raspberry Pi OS (full version).  It should work with other screens out of the box given the correct screen dimensions in the config file since it utilizes the X window environment and the pygame library to display images.

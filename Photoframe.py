@@ -17,6 +17,7 @@ import configparser
 import cv2
 import signal
 import sqlite3
+import shutil
 
 # create logger
 logger = logging.getLogger(__name__)

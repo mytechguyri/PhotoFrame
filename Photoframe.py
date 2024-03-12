@@ -26,12 +26,13 @@ formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(messag
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
-#clean up
-os.system('rm /tmp/image_cache.db')
-os.system('rm /tmp/*.jpg')
+#make sure the necessary directories and files are defined
+cache_path = os.path.expanduser("~/image_cache")
+sqlite_db = os.path.expanduser("~/image_cache.db")
+config_path = os.path.expanduser("~/photoframe.cfg")
 
 #Create SQLite database
-conn = sqlite3.connect('/tmp/image_cache.db')
+conn = sqlite3.connect(sqlite_db)
 c = conn.cursor()
 try:
     c.execute('''
@@ -49,10 +50,10 @@ except sqlite3.Error as e:
 
 # Read Config file and set variables
 config = configparser.ConfigParser()
-read_config = config.read('/home/john/photoframe.cfg')
+read_config = config.read(config_path)
 if not read_config:
     logger.error(
-        "Failed to read the config file at ~/photoframe.cfg.  Did you forget to create it?")
+        "Failed to read the config file at {config_path}.  Did you forget to create it?")
     exit(1)
 try:
     EMAIL = config['EMAIL']['login']
@@ -68,7 +69,7 @@ try:
 except KeyError as e:
     key = e.args[0]
     logger.error(
-        f"Failed to find '{e.args[0]}' value in ~/photoframe.cfg config file")
+        f"Failed to find '{e.args[0]}' value in {config_path} config file")
     raise
 
 # Define functions
@@ -92,12 +93,14 @@ def check_cache(email_id, index):
     return result[0] if result else None
 
 def add_to_cache(email_id, index, image_path):
+    total, used, free = shutil.disk_usage("/")
+    min_free = total // 10
     c.execute('INSERT OR REPLACE INTO cache (email_id, image_index, image_path) VALUES (?, ?, ?)', (email_id, index, image_path))
     conn.commit()
     c.execute('SELECT COUNT(*) FROM cache')
     rows = c.fetchone()
     count = rows[0]
-    if count > CACHE_SIZE:
+    if free < min_free:
         c.execute('SELECT image_path FROM cache ORDER BY timestamp LIMIT 1')
         rows = c.fetchone()
         oldest_image_path = rows[0]
@@ -105,7 +108,20 @@ def add_to_cache(email_id, index, image_path):
         c.execute('DELETE FROM cache WHERE timestamp = (SELECT MIN(timestamp) FROM cache)')
         conn.commit()
 
-def generate_unique_filename_and_download(part, email_id, index, base_dir='/tmp/'):
+def clean_cache(client, c, messages):
+    existing_ids = [msg.decode() for msg in messages]
+    c.execute('SELECT DISTINCT email_id FROM cache')
+    cached_ids = [row[0] for row in c.fetchall()]
+    for email_id in cached_ids:
+        if email_id not in existing_ids:
+            c.execute('SELECT image_path FROM cache WHERE email_id = ?', (email_id,))
+            image_paths = c.fetchall()
+            for path in image_paths:
+                os.remove(path[0])  # Delete image file
+            c.execute('DELETE FROM cache WHERE email_id = ?', (email_id,))  # Delete cache entry
+            conn.commit()
+            
+def generate_unique_filename_and_download(part, email_id, index):
     file_name = part.get_filename().lower()
     cache_hit = check_cache(email_id, index)
     if cache_hit:
@@ -113,7 +129,7 @@ def generate_unique_filename_and_download(part, email_id, index, base_dir='/tmp/
     else:
         timestamp = datetime.now().strftime('%Y%m%d%H%M%S%f')
         base_name, extension = os.path.splitext(file_name)
-        unique_file_path = os.path.join(base_dir, f'{base_name}_{timestamp}{extension}')
+        unique_file_path = os.path.join(cache_path, f'{base_name}_{timestamp}{extension}')
         with open(unique_file_path, 'wb') as f:
             f.write(part.get_payload(decode=True))
         if file_name.endswith('.heic'):
@@ -243,6 +259,7 @@ screen = pygame.display.set_mode((screen_width, screen_height), FULLSCREEN)
 pygame.mouse.set_visible(False)
 screen.fill((0, 0, 0))
 pygame.display.flip()
+os.makedirs(cache_path, exist_ok=True)
 connection_attempts = 0
 while True:
         try:
@@ -259,6 +276,7 @@ while True:
 # Main loop
 while True:
     messages = client.search('ALL')
+    clean_cache(client, c, messages)
     for msgid in messages:
         current_image_index = 0
         if SLEEP and AWAKE:

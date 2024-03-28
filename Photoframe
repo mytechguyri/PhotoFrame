@@ -28,9 +28,9 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 #make sure the necessary directories and files are defined
-cache_path = os.path.expanduser("~/image_cache")
-sqlite_db = os.path.expanduser("~/image_cache.db")
-config_path = os.path.expanduser("~/photoframe.cfg")
+cache_path = "image_cache"
+sqlite_db = "image_cache.db"
+config_path = "photoframe.cfg"
 
 #Create SQLite database
 conn = sqlite3.connect(sqlite_db)

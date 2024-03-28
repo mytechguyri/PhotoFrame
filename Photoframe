@@ -29,7 +29,7 @@ logger.addHandler(handler)
 
 #make sure the necessary directories and files are defined
 cache_path = "image_cache"
-sqlite_db = "image_cache.db"
+os.makedirs(cache_path, exist_ok=True)
 config_path = "photoframe.cfg"
 
 #Create SQLite database

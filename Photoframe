@@ -326,7 +326,20 @@ while True:
  
 # Main loop
 while True:
-    messages = client.search('ALL')
+    try:
+        messages = client.search('ALL')
+    except Exception as e:
+        logger.error("IMAP Connection lost, reconnecting: ", e)
+        while True:
+            try:
+                client = IMAPClient(SERVER)
+                client.login(EMAIL, PASSWORD)
+                select_info = client.select_folder(FOLDER)
+                folders = client.list_folders(directory='', pattern='*')
+                break
+            except Exception as e:
+                logger.error("Failed to connect to the IMAP server, retrying:", e)
+                time.sleep(10)
     clean_cache(client, c, messages)
     for msgid in messages:
         current_image_index = 0

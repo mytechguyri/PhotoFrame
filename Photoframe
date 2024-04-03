@@ -1,4 +1,5 @@
 #!/bin/python3
+import io
 import email
 from imapclient import IMAPClient
 import os
@@ -18,6 +19,7 @@ import cv2
 import signal
 import sqlite3
 import shutil
+import qrcode
 
 # create logger
 logger = logging.getLogger(__name__)
@@ -26,11 +28,13 @@ handler = logging.FileHandler('debug.log')
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 handler.setFormatter(formatter)
 logger.addHandler(handler)
+logger.info("Starting PhotoFrame Live")
 
 #make sure the necessary directories and files are defined
 cache_path = "image_cache"
 os.makedirs(cache_path, exist_ok=True)
 config_path = "photoframe.cfg"
+sqlite_db = "image_cache.db"
 
 #Create SQLite database
 conn = sqlite3.connect(sqlite_db)
@@ -50,7 +54,7 @@ except sqlite3.Error as e:
     print(f"{e}")
 
 # Read Config file and set variables
-config = configparser.ConfigParser()
+config = configparser.ConfigParser(comment_prefixes=['#', ';'])
 read_config = config.read(config_path)
 if not read_config:
     logger.error(
@@ -62,11 +66,11 @@ try:
     SERVER = config['EMAIL']['server']
     FOLDER = config['EMAIL']['folder']
     PASSWORD_SUBJECT = config['EMAIL']['subject_pw'].lower()
-    DELAY = int(config['SCREEN']['delay']) * 10
+    DELAY = int(config['SCREEN']['delay'].strip()) * 10
     SLEEP = config['SCREEN']['sleep']
     AWAKE = config['SCREEN']['awake']
-    screen_width = int(config['SCREEN']['width'])
-    screen_height = int(config['SCREEN']['height'])
+    screen_width = int(config['SCREEN']['width'].strip())
+    screen_height = int(config['SCREEN']['height'].strip())
 except KeyError as e:
     key = e.args[0]
     logger.error(
@@ -74,8 +78,24 @@ except KeyError as e:
     raise
 
 # Define functions
+def generate_qrcode ():
+    try:
+        qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=5, border=2)
+        qr.add_data(f"mailto:{EMAIL}?subject={PASSWORD_SUBJECT}")
+        qr.make(fit=True)
+        img_qr = qr.make_image(fill='black', back_color='white')
+        byte_io = io.BytesIO()
+        img_qr.save(byte_io, format="PNG")
+        byte_io.seek(0)
+        qr_code = pygame.image.load(byte_io)
+        qr_size = qr_code.get_size()
+        qr_position = (screen_width - qr_size[0] - 15, screen_height - qr_size[1] - 15)
+        return (qr_code, qr_position)
+    except Exception as e:
+        logger.error(f"An error occured: {e}")
+
 def signal_handler(sig, frame):
-    logger.info('SIGTERM received.  Exiting gracefully')
+    logger.info('SIGTERM received.  Exiting')
     mail.logout()
     sys.exit(0)
 
@@ -91,7 +111,15 @@ def parse_time(time_str):
 def check_cache(email_id, index):
     c.execute('SELECT image_path FROM cache WHERE email_id = ? AND image_index = ?', (email_id, index))
     result = c.fetchone()
-    return result[0] if result else None
+    if result:
+        if os.path.isfile(result[0]):
+            return result[0]
+        else:
+            c.execute('DELETE FROM cache WHERE email_id = ? AND image_index = ?', (email_id, index))
+            conn.commit()
+            return None
+    else:
+        return None
 
 def add_to_cache(email_id, index, image_path):
     total, used, free = shutil.disk_usage("/")
@@ -110,18 +138,21 @@ def add_to_cache(email_id, index, image_path):
         conn.commit()
 
 def clean_cache(client, c, messages):
-    existing_ids = [msg.decode() for msg in messages]
     c.execute('SELECT DISTINCT email_id FROM cache')
     cached_ids = [row[0] for row in c.fetchall()]
-    for email_id in cached_ids:
-        if email_id not in existing_ids:
+    for msgid in messages:
+        email_id = str(msgid)  # Convert msgid to a string if needed
+        if email_id not in cached_ids:
             c.execute('SELECT image_path FROM cache WHERE email_id = ?', (email_id,))
             image_paths = c.fetchall()
-            for path in image_paths:
-                os.remove(path[0])  # Delete image file
-            c.execute('DELETE FROM cache WHERE email_id = ?', (email_id,))  # Delete cache entry
-            conn.commit()
-            
+            if isinstance(image_paths, list):
+                for path in image_paths:
+                    os.remove(path[0])  # Delete image file
+                c.execute('DELETE FROM cache WHERE email_id = ?', (email_id,))  # Delete cache entry
+                conn.commit()
+            else:
+                logger.error(f"Unexpected result from fetchall: {image_paths}")
+
 def generate_unique_filename_and_download(part, email_id, index):
     file_name = part.get_filename().lower()
     cache_hit = check_cache(email_id, index)
@@ -161,16 +192,14 @@ def generate_unique_filename_and_download(part, email_id, index):
         return unique_file_path
 
 def display_image(img_path):
-    #pygame.mouse.set_visible(False)
     screen.fill((0, 0, 0))
-    pygame.display.flip()
     img = pygame.image.load(img_path)
     screen.blit(img, (0,0))
     pygame.display.flip()
     for _ in range(DELAY):
         for event in pygame.event.get():
             if event.type == pygame.FINGERDOWN:
-                action_dict = {1: 'Message deleted', 2: 'Message Archived', 3: 'Continuing...'}
+                action_dict = {1: 'Message deleted', 2: 'Message Archived', 3: 'Continuing...', 4: 'Displaying QRCode'}
                 action = dialog_box(msgid)
                 logger.info(action_dict[action])
                 return
@@ -179,43 +208,60 @@ def display_image(img_path):
 def dialog_box(msgid):
     def on_delete():
         client.move(msgid, '[Gmail]/Trash')
+        root.destroy()
+        screen.fill((0, 0, 0))
+        pygame.display.flip()
         c.execute('SELECT image_path FROM cache WHERE email_id = ?', (msgid,))
         rows = c.fetchall()
         for row in rows:
             os.remove(row[0])
         c.execute('DELETE FROM cache WHERE email_id = ?', (msgid,))
         conn.commit()
-        root.destroy()
         result.set(1)
 
     def on_archive():
         client.move(msgid, 'Stored')
+        root.destroy()
+        dim_surface = pygame.Surface(screen.get_size()).convert_alpha()
+        dim_surface.fill((0 ,0 ,0 , 76))
+        screen.blit(dim_surface, (0, 0))
+        pygame.display.flip()
         c.execute('SELECT image_path FROM cache WHERE email_id = ?', (msgid,))
         rows = c.fetchall()
         for row in rows:
             os.remove(row[0])
         c.execute('DELETE FROM cache WHERE email_id = ?', (msgid,))
         conn.commit()
-        root.destroy()
         result.set(2)
 
     def on_continue():
         root.destroy()
+        pygame.display.flip()
         result.set(3)
+
+    def on_qrcode():
+        qr_code, qr_position =  generate_qrcode()
+        screen.blit(qr_code, qr_position)
+        root.destroy()
+        pygame.display.flip()
+        time.sleep(15)
+        result.set(4)
 
     root = tk.Tk()
     result = tk.IntVar()
-    root.geometry("675x50+290+325")
+    root.geometry("700x50+290+325")
     root.title("Please select an option")
     button_font = ("Helvetica", 14)
-    button_width = 20
+    button_width = 15
     button_height = 2
     delete_button = tk.Button(root, text="Delete", command=on_delete, font=button_font, width=button_width, height=button_height)
     archive_button = tk.Button(root, text="Archive", command=on_archive, font=button_font, width=button_width, height=button_height)
     continue_button = tk.Button(root, text="Continue", command=on_continue, font=button_font, width=button_width, height=button_height)
+    qrcode_button = tk.Button(root, text="QR Code", command=on_qrcode, font=button_font, width=button_width, height=button_height)
     delete_button.grid(row=0, column=0)
     archive_button.grid(row=0, column=1)
     continue_button.grid(row=0, column=2)
+    qrcode_button.grid(row=0, column=3)
     root.mainloop()
     exitcode = result.get()
     return exitcode
@@ -249,17 +295,22 @@ def sleep_time(stop_time, start_time):
        return False
     return True
 
+def splash_screen():
+    qr_code, qr_position =  generate_qrcode()
+    display_image("photoframe_splash.png")
+    screen.blit(qr_code, qr_position)
+    pygame.display.flip()
+    time.sleep(10)
+
 screen_state = screen_sleep("off")
-CACHE_SIZE=50
+
 if SLEEP:
     SLEEP_TIME = parse_time(SLEEP)
 if AWAKE:
     AWAKE_TIME = parse_time(AWAKE)
 pygame.init()
 screen = pygame.display.set_mode((screen_width, screen_height), FULLSCREEN)
-pygame.mouse.set_visible(False)
-screen.fill((0, 0, 0))
-pygame.display.flip()
+splash_screen()
 os.makedirs(cache_path, exist_ok=True)
 connection_attempts = 0
 while True:
@@ -268,12 +319,11 @@ while True:
             client.login(EMAIL, PASSWORD)
             select_info = client.select_folder(FOLDER)
             folders = client.list_folders(directory='', pattern='*')
-            print(f'Folders: {folders}')
             break
         except Exception as e:
             logger.error("Failed to connect to the IMAP server, retrying:", e)
             time.sleep(10)
-
+ 
 # Main loop
 while True:
     messages = client.search('ALL')
@@ -314,6 +364,7 @@ while True:
         for part in email_message.walk():
             if part.get('Content-Disposition') is None or part.get('Content-Disposition').lower().startswith('inline'):
                continue
+
             file_name = part.get_filename().lower()
             if file_name.endswith('.jpg') or file_name.endswith('.png') or file_name.endswith('.gif') or file_name.endswith('.heic'):
                 image_path = generate_unique_filename_and_download(part, msgid, current_image_index)

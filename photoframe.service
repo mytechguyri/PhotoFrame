@@ -1,0 +1,18 @@
+[Unit]
+Description=Photoframe display service
+After=graphical.target
+
+[Service]
+Environment="DISPLAY=:0"
+Environment="XAUTHORITY=/home/[username]/.Xauthority"
+Environment="XDG_RUNTIME_DIR=/run/user/1000"
+Environment="PULSE_RUNTIME_PATH=/run/user/1000/pulse"
+Environment="HOME=/home/[username]"
+Environment="TERM=xterm"
+ExecStart=/usr/bin/startx /home/[username]/PhotoFrameLive/Photoframe
+User=john
+WorkingDirectory=/home/[username]/PhotoFrameLive
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

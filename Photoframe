@@ -1,91 +1,106 @@
 #!/bin/python3
-import io
-import sys
-import email
-from imapclient import IMAPClient
 import os
-from datetime import datetime
-from PIL import Image
+import sys
+import io
+import time
+import email
+import signal
+import shutil
+import sqlite3
+import logging
+import tempfile
+from datetime import datetime, timedelta, time as dt_time
+from email.utils import parseaddr
+import configparser
+import threading
+import subprocess
+import cv2
 import pygame
 from pygame.locals import FULLSCREEN
+import rawpy
+import imageio
+import pyheif
+import qrcode
 import tkinter as tk
 from tkinter import messagebox
-import logging
-from email.utils import parseaddr
-import subprocess
-import time
-from datetime import datetime, timedelta, time as dt_time
-import configparser
-import cv2
-import signal
-import sqlite3
-import shutil
-import qrcode
-import threading
+from PIL import Image
+from imapclient import IMAPClient
 
-# create log messages to journal vis stderr
+# redirect messages to systemd journal via stderr
 sys.stdout = sys.stderr
 print("Started PhotoFrame Live")
 
-#make sure the necessary directories and files are defined
-cache_path = "image_cache"
-os.makedirs(cache_path, exist_ok=True)
-config_path = "photoframe.cfg"
-sqlite_db = "image_cache.db"
-pause_event = threading.Event()
-#Create SQLite database
-conn = sqlite3.connect(sqlite_db)
-c = conn.cursor()
-try:
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS cache (
-            email_id TEXT,
-            image_index INTEGER,
-            image_path TEXT,
-            PRIMARY KEY (email_id, image_index)
-            )
-    ''')
-    conn.commit()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS email (
-            email_id TEXT,
-            total_images INTEGER,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (email_id)
-            )
-    ''')
-    conn.commit()
-
-except sqlite3.Error as e:
-    print(f"{e}")
-
-# Read Config file and set variables
-config = configparser.ConfigParser(comment_prefixes=['#', ';'])
-read_config = config.read(config_path)
-if not read_config:
-    print(f"Failed to read the config file at {config_path}.  Did you forget to create it?")
-    exit(1)
-try:
-    EMAIL = config['EMAIL']['login']
-    PASSWORD = config['EMAIL']['password']
-    SERVER = config['EMAIL']['server']
-    FOLDER = config['EMAIL']['folder']
-    PASSWORD_SUBJECT = config['EMAIL']['subject_pw'].lower()
-    DELAY = int(config['SCREEN']['delay'].strip()) * 10
-    SLEEP = config['SCREEN']['sleep']
-    AWAKE = config['SCREEN']['awake']
-    screen_width = int(config['SCREEN']['width'].strip())
-    screen_height = int(config['SCREEN']['height'].strip())
-except KeyError as e:
-    key = e.args[0]
-    print(f"Failed to find '{e.args[0]}' value in {config_path} config file")
-    raise
-
 # Define functions
+def ReadConfig():
+    config_path = "photoframe.cfg"
+    config = configparser.ConfigParser(comment_prefixes=['#', ';'])
+    read_config = config.read(config_path)
+    if not read_config:
+        raise FileNotFoundError(f"Failed to read the config file at {config_path}.  Did you forget to create it?")
+    try:
+        cfg = {
+            'EMAIL':config['EMAIL']['login'],
+            'PASSWORD':config['EMAIL']['password'],
+            'SERVER':config['EMAIL']['server'],
+            'FOLDER':config['EMAIL']['folder'],
+            'PASSWORD_SUBJECT':config['EMAIL']['subject_pw'].lower(),
+            'DELAY':int(config['SCREEN']['delay'].strip()) * 10,
+            'SLEEP':config['SCREEN']['sleep'],
+            'AWAKE':config['SCREEN']['awake'],
+            'screen_width':int(config['SCREEN']['width'].strip()),
+            'screen_height':int(config['SCREEN']['height'].strip()),
+            'cache_path':'image_cache',
+            'sqlite_db':'image_cache.db'
+        }
+        return cfg
+    except KeyError as e:
+        key = e.args[0]
+        print(f"Failed to find '{e.args[0]}' value in {config_path} config file")
+        raise
+
+def Setup_Image_Cache():
+  os.makedirs(cfg['cache_path'], exist_ok=True)
+  readme_path = os.path.join(cfg['cache_path'], 'README!')
+  if not os.path.exists(readme_path):
+    with open(readme_path, 'w') as readme_file:
+        readme_file.write("DO NOT PLACE ANY FILES IN THIS DIRECTORY!\nAnything other than image cache files that exist in the database will be automatically deleted.\n")
+
+def Setup_Database(sqlite_db):
+    conn = sqlite3.connect(sqlite_db)
+    c = conn.cursor()
+    try:
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS cache (
+                email_id TEXT,
+                image_index INTEGER,
+                image_path TEXT,
+                PRIMARY KEY (email_id, image_index)
+                )
+        ''')
+        c.execute('''
+            CREATE INDEX IF NOT EXISTS idx_cache_email_id ON cache(email_id);
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS email (
+                email_id TEXT,
+                total_images INTEGER,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (email_id)
+                )
+        ''')
+        c.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_email_email_id ON email(email_id);
+        ''')
+        conn.commit()
+        return conn, c
+    except sqlite3.Error as e:
+        print(f"Error setting up the database {sqlite_db}: {e}")
+        raise
+
 def generate_qrcode ():
     try:
         qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=5, border=2)
-        qr.add_data(f"mailto:{EMAIL}?subject={PASSWORD_SUBJECT}")
+        qr.add_data(f"mailto:{cfg['EMAIL']}?subject={cfg['PASSWORD_SUBJECT']}")
         qr.make(fit=True)
         img_qr = qr.make_image(fill='black', back_color='white')
         byte_io = io.BytesIO()
@@ -93,7 +108,7 @@ def generate_qrcode ():
         byte_io.seek(0)
         qr_code = pygame.image.load(byte_io)
         qr_size = qr_code.get_size()
-        qr_position = (screen_width - qr_size[0] - 15, screen_height - qr_size[1] - 15)
+        qr_position = (cfg['screen_width'] - qr_size[0] - 15, cfg['screen_height'] - qr_size[1] - 15)
         return (qr_code, qr_position)
     except Exception as e:
         print(f"An error occured: {e}")
@@ -104,14 +119,26 @@ def signal_handler(sig, frame):
     conn.close()
     sys.exit(0)
 
-signal.signal(signal.SIGTERM, signal_handler)
-
 def parse_time(time_str):
     try:
         hours, minutes = map(int, time_str.split(':'))
         return dt_time(hours, minutes)
     except ValueError:
         raise ValueError("Invalid time format. Please use HH:MM format.")
+
+def cache_directory_maintenance():
+    conn, c = Setup_Database(cfg['sqlite_db'])
+    c.execute("SELECT image_path FROM cache")
+    cache_files = [row[0] for row in c.fetchall()]
+    files = os.listdir(cfg['cache_path'])
+    for file in files:
+        if file != 'README!':
+            file_path = os.path.join(cfg['cache_path'], file)
+            if file_path not in cache_files:
+                try:
+                    os.remove(file_path)
+                except OSError as e:
+                    print(f"Error: {e.filename} - {e.strerror}.")
 
 def check_cache(msgid, index, messages, c):
     c.execute('SELECT email_id FROM email')
@@ -143,7 +170,14 @@ def check_cache(msgid, index, messages, c):
                 c.execute('DELETE FROM cache WHERE image_path = ?', (image_path))
                 if total_images == 0:
                     c.execute('DELETE FROM email WHERE email_id = ?', (msgid,))
-                    client.move(email_id, 'Stored')
+                    MAX_RETRIES = 3
+                    for _ in range (MAX_RETRIES):
+                        try:
+                            client.move(email_id, 'Stored')
+                            break
+                        except Exception as e:
+                            print(f"Unexpected error archiving email from cache {e}")
+                            client = Connect_IMAP()
                 else:
                     c.execute('UPDATE email SET total_images = ? WHERE email_id = ?', (total_images, msgid))
                 conn.commit()
@@ -156,7 +190,6 @@ def check_cache(msgid, index, messages, c):
 
 def add_to_cache(email_id, c, index, image_path):
     total, used, free = shutil.disk_usage("image_cache/")
-    print(f'{total} Total space, {used} used, {free} free')
     min_free = total // 10
     c.execute('INSERT OR REPLACE INTO cache (email_id, image_index, image_path) VALUES (?, ?, ?)', (email_id, index, image_path))
     c.execute('INSERT OR REPLACE INTO email (email_id, total_images) VALUES (?, ?)', (email_id, index))
@@ -177,11 +210,11 @@ def generate_unique_filename_and_download(part, email_id, index, sender, sender_
     file_name = part.get_filename().lower()
     timestamp = datetime.now().strftime('%Y%m%d%H%M%S%f')
     base_name, extension = os.path.splitext(file_name)
-    unique_file_path = os.path.join(cache_path, f'{base_name}_{timestamp}{extension}')
-    with open(unique_file_path, 'wb') as f:
-        f.write(part.get_payload(decode=True))
+    unique_file_path = os.path.join(cfg['cache_path'], f'{base_name}_{timestamp}.jpg')
+    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+        temp_file.write(part.get_payload(decode=True))
     if file_name.endswith('.heic'):
-        heif_file = pyheif.read(unique_file_path)
+        heif_file = pyheif.read(temp_file.name)
         image = Image.frombytes(
             heif_file.mode,
             heif_file.size,
@@ -190,23 +223,28 @@ def generate_unique_filename_and_download(part, email_id, index, sender, sender_
             heif_file.mode,
             heif_file.stride,
         )
-        unique_file_path = unique_file_path.replace('.heic', '.png')
-        image.save(unique_file_path)
+        image.save(temp_file.name, format='JPG')
+    elif file_name.endswith('.dng'):
+        with rawpy.imread(temp_file.name) as raw:
+            rgb = raw.postprocess()
+        imageio.imsave(temp_file.name, rgb, format='JPEG')
+
     command = [
         'convert',
-        unique_file_path,
-        '-resize', f'{screen_width}x{screen_height}',
+        temp_file.name,
+        '-resize', f"{cfg['screen_width']}x{cfg['screen_height']}",
         '-gravity', 'center', '-background', 'black',
-        '-extent', f'{screen_width}x{screen_height}',
+        '-extent', f"{cfg['screen_width']}x{cfg['screen_height']}",
         '-gravity', 'SouthWest',
         '-pointsize', '20',
         '-fill', 'white',
         '-annotate', '+5+10', f'Sent by: {sender_name} via {sender} on {msg_date} at {msg_time}',
         unique_file_path]
     subprocess.run(command)
+    os.unlink(temp_file.name)
     add_to_cache(email_id, c, index, unique_file_path)
     return unique_file_path
-
+    
 def display_image(img_path):
     screen.fill((0, 0, 0))
     img = pygame.image.load(img_path)
@@ -215,7 +253,7 @@ def display_image(img_path):
     if img_path ==  "photoframe_splash.png":
         time.sleep(1)
         return
-    for _ in range(DELAY):
+    for _ in range(cfg['DELAY']):
         for event in pygame.event.get():
             if event.type == pygame.FINGERDOWN:
                 action_dict = {1: 'Message deleted', 2: 'Message Archived', 3: 'Continuing...', 4: 'Displaying QRCode'}
@@ -226,7 +264,14 @@ def display_image(img_path):
 def dialog_box(msgid, img_path):
     def on_delete():
         root.destroy()
-        client.move(msgid, '[Gmail]/Trash')
+        MAX_RETRIES = 3
+        for _ in range (MAX_RETRIES):
+            try:
+                client.move(msgid, '[Gmail]/Trash')
+                break
+            except Exception as e:
+                print(f"Unexpected IMAP error deleting message: {e}")
+                client = Connect_IMAP()
         screen.fill((0, 0, 0))
         pygame.display.flip()
         c.execute('SELECT image_path FROM cache WHERE email_id = ?', (msgid,))
@@ -251,7 +296,14 @@ def dialog_box(msgid, img_path):
         c.execute('DELETE FROM cache WHERE email_id = ? AND image_index = ?', (msgid, current_image_index))
         if total_images == 0:
             c.execute('DELETE FROM email WHERE email_id = ?', (msgid,))
-            client.move(msgid, 'Stored')
+            MAX_RETRIES = 3
+            for _ in range (MAX_RETRIES):
+                try:
+                    client.move(msgid, 'Stored')
+                    break
+                except Exception as e:
+                    print(f"Unexpected IMAP error archiving message: {e}")
+                    client = Connect_IMAP()
         else:
             c.execute('UPDATE email SET total_images = ? WHERE email_id = ?', (total_images, msgid))
         conn.commit()
@@ -341,13 +393,26 @@ def walk_message(client, msgid, current_image_index, messages, c):
             else:
                 display_image(image_path[0])
     else:
-        response = client.fetch(msgid, ['BODY.PEEK[]'])
+        MAX_RETRIES = 3
+        for _ in range (MAX_RETRIES):
+            try:
+                response = client.fetch(msgid, ['BODY.PEEK[]'])
+                break
+            except Exception as e:
+                print(f"Unexpected IMAP error:  {e}")
+                client = Connect_IMAP()
         raw_email = response[msgid][b'BODY[]']
         email_message = email.message_from_bytes(raw_email)
         subject = email_message['subject'].lower()
-        if PASSWORD_SUBJECT and PASSWORD_SUBJECT not in subject:
-            client.move(msgid, 'password reject')
-            return
+        if cfg['PASSWORD_SUBJECT'] and cfg['PASSWORD_SUBJECT'] not in subject:
+            MAX_RETRIES = 3
+            for _ in range (MAX_RETRIES):
+                try:
+                    client.move(msgid, 'password reject')
+                    return
+                except Exception as e:
+                    print(f"Unexpected error moving message to password reject {e}")
+                    client = Connect_IMAP()
         sender = parseaddr(email_message['From'])[1]
         sender_name = parseaddr(email_message['From'])[0]
         date_header = email_message['Date']
@@ -361,7 +426,7 @@ def walk_message(client, msgid, current_image_index, messages, c):
             if part.get('Content-Disposition') is None or part.get('Content-Disposition').lower().startswith('inline'):
                continue
             file_name = part.get_filename().lower()
-            if file_name.endswith('.jpg') or file_name.endswith('.png') or file_name.endswith('.gif') or file_name.endswith('.heic'):
+            if file_name.endswith('.jpg') or file_name.endswith('.png') or file_name.endswith('.gif') or file_name.endswith('.heic') or file_name.endswith('.dng'):
                 current_image_index += 1
                 image_path = generate_unique_filename_and_download(part, msgid, current_image_index, sender, sender_name, msg_date, msg_time)
                 display_image(image_path)
@@ -373,10 +438,10 @@ def walk_message(client, msgid, current_image_index, messages, c):
 def Connect_IMAP():
     while True:
             try:
-                client = IMAPClient(SERVER)
-                client.login(EMAIL, PASSWORD)
-                select_info = client.select_folder(FOLDER)
-                folders = client.list_folders(directory='', pattern='*')
+                client = IMAPClient(cfg['SERVER'])
+                client.login(cfg['EMAIL'], cfg['PASSWORD'])
+                select_info = client.select_folder(cfg['FOLDER'])
+                print(f"Connected to {cfg['SERVER']}")
                 return(client)
             except Exception as e:
                 print(f"Failed to connect to the IMAP server, retrying: {e}")
@@ -397,8 +462,9 @@ def GetMessages(client):
             client.set_flags(messages, '\\Seen', silent=True)
             return messages
         except Exception as e:
-            print(f"Unexpected error while getting messages: {e}")
+            print(f"Unexpected error while getting messages, retrying...: {e}")
             time.sleep(60)
+            client = Connect_IMAP()
 
 def PollNewMessages(client):
     global messages
@@ -411,12 +477,15 @@ def PollNewMessages(client):
             client.set_flags(new_messages, '\\Seen', silent=True)
         except Exception as e:
             print(f"Unexpected error while polling for new messages: {e}")
-            time.sleep(60)
+            if not Check_IMAP():
+                client = Connect_IMAP()
+            else:
+                time.sleep(60)
 
 def SleepOrWake(client, screen_State):
-    if SLEEP and AWAKE:
-        SLEEP_TIME = parse_time(SLEEP)
-        AWAKE_TIME = parse_time(AWAKE)
+    if cfg['SLEEP'] and cfg['AWAKE']:
+        SLEEP_TIME = parse_time(cfg['SLEEP'])
+        AWAKE_TIME = parse_time(cfg['AWAKE'])
         screen_state = check_screen_state()
         while sleep_time(SLEEP_TIME, AWAKE_TIME):
             if Check_IMAP(client):
@@ -444,14 +513,26 @@ def SleepOrWake(client, screen_State):
     else:
         while screen_state == "off":
             screen_state = screen_sleep("on")
+            pause_event.set()
 
-pygame.init()
-screen_state = screen_sleep("off")
-screen = pygame.display.set_mode((screen_width, screen_height), FULLSCREEN)
+def PygameInit():
+    pygame.init()
+    screen_state = screen_sleep("off")
+    screen = pygame.display.set_mode((cfg['screen_width'], cfg['screen_height']), FULLSCREEN)
+    return screen
+
+signal.signal(signal.SIGTERM, signal_handler)
+cfg = ReadConfig()
+Setup_Image_Cache()
+conn, c = Setup_Database(cfg['sqlite_db'])
+cleanup = threading.Thread(target=cache_directory_maintenance)
+cleanup.start()
+screen = PygameInit()
 splash_screen()
-os.makedirs(cache_path, exist_ok=True)
+screen_state = check_screen_state()
 client = Connect_IMAP()
 messages = GetMessages(client)
+pause_event = threading.Event()
 thread = threading.Thread(target=PollNewMessages, args = (client,))
 thread.start()
 pause_event.set()

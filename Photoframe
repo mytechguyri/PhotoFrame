@@ -413,10 +413,31 @@ def PollNewMessages(client):
             print(f"Unexpected error while polling for new messages: {e}")
             time.sleep(60)
 
-if SLEEP:
-    SLEEP_TIME = parse_time(SLEEP)
-if AWAKE:
-    AWAKE_TIME = parse_time(AWAKE)
+def SleepOrWake(client, screen_State):
+    if SLEEP and AWAKE:
+        SLEEP_TIME = parse_time(SLEEP)
+        AWAKE_TIME = parse_time(AWAKE)
+        screen_state = check_screen_state()
+        while sleep_time(SLEEP_TIME, AWAKE_TIME):
+            if Check_IMAP(client):
+                client.logout()
+            print(f"Current: {datetime.now().time()}  Sleep: {SLEEP_TIME}  Awake: {AWAKE_TIME}")
+            while screen_state == "on":
+                print("Entering sleep mode")
+                screen_state = screen_sleep("off")
+                pause_event.clear()
+            time.sleep(900)
+        else:
+            while screen_state == "off":
+                print("Waking up")
+                splash_screen()
+                pause_event.set()
+                screen_state = screen_sleep("on")
+            client = Connect_IMAP()
+    else:
+        while screen_state == "off":
+            screen_state = screen_sleep("on")
+
 pygame.init()
 screen_state = screen_sleep("off")
 screen = pygame.display.set_mode((screen_width, screen_height), FULLSCREEN)
@@ -427,30 +448,15 @@ messages = GetMessages(client)
 thread = threading.Thread(target=PollNewMessages, args = (client,))
 thread.start()
 pause_event.set()
+i=0
 
 # Main loop
 while True:
-    for msgid in messages:
+    if i < len(messages):
+        msgid = messages[i]
+        i += 1
         current_image_index = 0
-        if SLEEP and AWAKE:
-            screen_state = check_screen_state()
-            while sleep_time(SLEEP_TIME, AWAKE_TIME):
-                if Check_IMAP(client):
-                    client.logout()
-                print(f"Current: {datetime.now().time()}  Sleep: {SLEEP_TIME}  Awake: {AWAKE_TIME}")
-                while screen_state == "on":
-                    print("Entering sleep mode")
-                    screen_state = screen_sleep("off")
-                    pause_event.clear()
-                time.sleep(900)
-            else:
-                while screen_state == "off":
-                    print("Waking up")
-                    splash_screen()
-                    pause_event.set()
-                    screen_state = screen_sleep("on")
-                client = Connect_IMAP()
-        else:
-            while screen_state == "off":
-                screen_state = screen_sleep("on")
+        SleepOrWake(client, screen_state)
         walk_message(client, msgid, current_image_index, messages, c)
+    else:
+        i = 0

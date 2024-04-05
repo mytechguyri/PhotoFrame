@@ -14,7 +14,7 @@ import logging
 from email.utils import parseaddr
 import subprocess
 import time
-from datetime import datetime, time as dt_time
+from datetime import datetime, timedelta, time as dt_time
 import configparser
 import cv2
 import signal
@@ -23,7 +23,7 @@ import shutil
 import qrcode
 import threading
 
-# create log messages to journal via stderr
+# create log messages to journal vis stderr
 sys.stdout = sys.stderr
 print("Started PhotoFrame Live")
 
@@ -421,24 +421,26 @@ def SleepOrWake(client, screen_State):
         while sleep_time(SLEEP_TIME, AWAKE_TIME):
             if Check_IMAP(client):
                 client.logout()
-            print(f"Current: {datetime.now().time()}  Sleep: {SLEEP_TIME}  Awake: {AWAKE_TIME}")
+            print(f"Current: {datetime.now().time().strftime('%H:%M:%S')}  Sleep: {SLEEP_TIME}  Awake: {AWAKE_TIME}")
             while screen_state == "on":
-                print(f"Going to sleep until {AWAKE_TIME}")
                 screen_state = screen_sleep("off")
                 pause_event.clear()
-            now = datetime.datetime.now()
-            awake = datetime.datetime.combine(now.date(), AWAKE_TIME)
+            now = datetime.now()
+            awake = datetime.combine(now.date(), AWAKE_TIME)
             if now > awake:
-                awake += datetime.timedelta(days=1)
-            sleep_seconds = (awake - now).total_seconds() + 60
+                awake += timedelta(days=1)
+            sleep_seconds = (awake - now).total_seconds()
+            hours, remainder = divmod(sleep_seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            print(f"Going to sleep for {int(hours)} hours, {int(minutes)} minutes, and {int(seconds)} seconds, until {AWAKE_TIME}")
             time.sleep(sleep_seconds)
         else:
             while screen_state == "off":
                 print("Waking up")
                 splash_screen()
-                screen_state = screen_sleep("on")
-                client = Connect_IMAP()
                 pause_event.set()
+                screen_state = screen_sleep("on")
+            client = Connect_IMAP()
     else:
         while screen_state == "off":
             screen_state = screen_sleep("on")

@@ -436,7 +436,8 @@ def walk_message(client, msgid, current_image_index, messages, c):
                 play_movie(image_path)
 
 def Connect_IMAP():
-    while True:
+    global client
+    while not Check_IMAP(client):
             try:
                 client = IMAPClient(cfg['SERVER'])
                 client.login(cfg['EMAIL'], cfg['PASSWORD'])
@@ -446,6 +447,7 @@ def Connect_IMAP():
             except Exception as e:
                 print(f"Failed to connect to the IMAP server, retrying: {e}")
                 time.sleep(10)
+    return(client)
 
 def Check_IMAP(client):
     try:
@@ -477,10 +479,8 @@ def PollNewMessages(client):
             client.set_flags(new_messages, '\\Seen', silent=True)
         except Exception as e:
             print(f"Unexpected error while polling for new messages: {e}")
-            if not Check_IMAP():
-                client = Connect_IMAP()
-            else:
-                time.sleep(60)
+            client = Connect_IMAP()
+            time.sleep(60)
 
 def SleepOrWake(client, screen_State):
     if cfg['SLEEP'] and cfg['AWAKE']:
@@ -524,6 +524,7 @@ def PygameInit():
 signal.signal(signal.SIGTERM, signal_handler)
 cfg = ReadConfig()
 Setup_Image_Cache()
+client = None
 conn, c = Setup_Database(cfg['sqlite_db'])
 cleanup = threading.Thread(target=cache_directory_maintenance)
 cleanup.start()

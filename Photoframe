@@ -155,7 +155,7 @@ def check_cache(msgid, index, messages, c):
             return None
 
 def add_to_cache(email_id, c, index, image_path):
-    total, used, free = shutil.disk_usage("/image_cache/")
+    total, used, free = shutil.disk_usage("image_cache/")
     print(f'{total} Total space, {used} used, {free} free')
     min_free = total // 10
     c.execute('INSERT OR REPLACE INTO cache (email_id, image_index, image_path) VALUES (?, ?, ?)', (email_id, index, image_path))

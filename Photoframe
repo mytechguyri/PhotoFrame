@@ -404,7 +404,8 @@ def walk_message(client, msgid, current_image_index, messages, c):
         raw_email = response[msgid][b'BODY[]']
         email_message = email.message_from_bytes(raw_email)
         subject = email_message['subject'].lower()
-        if cfg['PASSWORD_SUBJECT'] and cfg['PASSWORD_SUBJECT'] not in subject:
+        labels = client.fetch([msgid], ['X-GM-LABELS'])
+        if cfg['PASSWORD_SUBJECT'] and cfg['PASSWORD_SUBJECT'] not in subject and "Approved" not in labels:
             MAX_RETRIES = 3
             for _ in range (MAX_RETRIES):
                 try:
